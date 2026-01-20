@@ -6,7 +6,8 @@ import {
   createAudioResource,
   AudioPlayerStatus,
   NoSubscriberBehavior,
-  StreamType
+  StreamType,
+  VoiceConnectionStatus
 } from "@discordjs/voice";
 import { spawn } from "node:child_process";
 import prism from "prism-media";
@@ -32,6 +33,11 @@ const client = new Client({
 
 let lastTitle = null;
 let nowPlayingMsgCooldown = 0;
+let shuttingDown = false;
+let reconnecting = false;
+let restartTimer = null;
+let restartDelayMs = 1000;
+const MAX_RESTART_DELAY_MS = 30_000;
 
 function startFfmpeg(streamUrl) {
   // ffmpeg decodes to raw PCM (s16le 48kHz stereo) which we then Opus-encode for Discord
@@ -79,7 +85,7 @@ async function maybePostNowPlaying(title) {
   try {
     const channel = await client.channels.fetch(NOWPLAYING_TEXT_CHANNEL_ID);
     if (channel?.isTextBased()) {
-      await channel.send(`🎶 Now playing: **${title}**`);
+      await channel.send(`Now playing: **${title}**`);
     }
   } catch (e) {
     console.error("Failed to post now playing:", e);
@@ -97,12 +103,28 @@ client.once("ready", async () => {
     process.exit(1);
   }
 
-  const connection = joinVoiceChannel({
-    channelId: channel.id,
-    guildId: guild.id,
-    adapterCreator: guild.voiceAdapterCreator,
-    selfDeaf: false
-  });
+  const connect = () =>
+    joinVoiceChannel({
+      channelId: channel.id,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: false
+    });
+
+  const attachConnectionHandlers = (voiceConnection) => {
+    voiceConnection.on("stateChange", (_, newState) => {
+      if (newState.status !== VoiceConnectionStatus.Disconnected || shuttingDown || reconnecting) return;
+      reconnecting = true;
+      console.warn("Voice connection disconnected. Attempting to reconnect.");
+      try { voiceConnection.destroy(); } catch {}
+      connection = connect();
+      connection.subscribe(player);
+      attachConnectionHandlers(connection);
+      reconnecting = false;
+    });
+  };
+
+  let connection = connect();
 
   const player = createAudioPlayer({
     behaviors: { noSubscriber: NoSubscriberBehavior.Play }
@@ -121,18 +143,35 @@ client.once("ready", async () => {
     console.error("Audio player error:", err);
   });
 
-  // Restart logic if ffmpeg dies
-  const restart = () => {
-    console.log("Restarting stream...");
-    try { ffmpeg.kill("SIGKILL"); } catch {}
-    const restarted = startFfmpeg(STREAM_URL);
-    ffmpeg = restarted.ffmpeg;
-    opusStream = restarted.opusStream;
-    const r = createAudioResource(opusStream, { inputType: StreamType.Opus });
-    player.play(r);
+  const restartStream = () => {
+    if (shuttingDown || restartTimer) return;
+    console.log(`Restarting stream in ${restartDelayMs}ms...`);
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      if (shuttingDown) return;
+      try { ffmpeg.kill("SIGKILL"); } catch {}
+      const restarted = startFfmpeg(STREAM_URL);
+      ffmpeg = restarted.ffmpeg;
+      opusStream = restarted.opusStream;
+      ffmpeg.on("close", restartStream);
+      const r = createAudioResource(opusStream, { inputType: StreamType.Opus });
+      player.play(r);
+      restartDelayMs = Math.min(restartDelayMs * 2, MAX_RESTART_DELAY_MS);
+    }, restartDelayMs);
   };
 
-  ffmpeg.on("close", restart);
+  const resetRestartDelay = () => {
+    restartDelayMs = 1000;
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
+  };
+
+  ffmpeg.on("close", restartStream);
+  player.on(AudioPlayerStatus.Playing, resetRestartDelay);
+
+  attachConnectionHandlers(connection);
 
   // Metadata listener (optional; depends on station support)
   const meta = listenIcyStreamTitle(STREAM_URL, {
@@ -140,7 +179,7 @@ client.once("ready", async () => {
       if (!title || title === lastTitle) return;
       lastTitle = title;
       console.log("Now playing:", title);
-      await setPresence(`🎶 ${title}`);
+      await setPresence(`Now playing: ${title}`);
       await maybePostNowPlaying(title);
     },
     onError: (err) => {
@@ -149,13 +188,20 @@ client.once("ready", async () => {
   });
 
   // If you want to “refresh” presence periodically even without changes:
+  const parsedInterval = Number(METADATA_PRESENCE_INTERVAL);
+  const intervalMs = Number.isFinite(parsedInterval) && parsedInterval > 0 ? parsedInterval * 1000 : 20_000;
   const interval = setInterval(() => {
-    if (lastTitle) setPresence(`🎶 ${lastTitle}`);
-  }, Number(METADATA_PRESENCE_INTERVAL) * 1000);
+    if (lastTitle) setPresence(`Now playing: ${lastTitle}`);
+  }, intervalMs);
 
   // Clean shutdown
   const shutdown = () => {
+    shuttingDown = true;
     clearInterval(interval);
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
     meta.stop();
     try { ffmpeg.kill("SIGKILL"); } catch {}
     try { connection.destroy(); } catch {}
