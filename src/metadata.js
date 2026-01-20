@@ -13,6 +13,27 @@ function pickHttpLib(url) {
 export function listenIcyStreamTitle(streamUrl, { onTitle, onError } = {}) {
   let stopped = false;
   let req = null;
+  let retryTimer = null;
+  let retryDelayMs = 1000;
+  const maxRetryDelayMs = 30_000;
+
+  const scheduleRetry = (reason) => {
+    if (stopped || retryTimer) return;
+    if (reason) onError?.(reason);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      retryDelayMs = Math.min(retryDelayMs * 2, maxRetryDelayMs);
+      start();
+    }, retryDelayMs);
+  };
+
+  const resetRetryDelay = () => {
+    retryDelayMs = 1000;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
 
   const start = () => {
     const u = new URL(streamUrl);
@@ -28,6 +49,7 @@ export function listenIcyStreamTitle(streamUrl, { onTitle, onError } = {}) {
         }
       },
       (res) => {
+        resetRetryDelay();
         const metaintHeader = res.headers["icy-metaint"];
         const metaint = metaintHeader ? parseInt(metaintHeader, 10) : 0;
 
@@ -92,11 +114,17 @@ export function listenIcyStreamTitle(streamUrl, { onTitle, onError } = {}) {
           }
         });
 
-        res.on("error", (err) => onError?.(err));
+        res.on("error", (err) => scheduleRetry(err));
+        res.on("end", () => scheduleRetry(new Error("Metadata stream ended.")));
+        res.on("close", () => scheduleRetry(new Error("Metadata stream closed.")));
       }
     );
 
-    req.on("error", (err) => onError?.(err));
+    req.setTimeout(15_000, () => {
+      req.destroy(new Error("Metadata request timeout."));
+    });
+
+    req.on("error", (err) => scheduleRetry(err));
     req.end();
   };
 
@@ -105,6 +133,10 @@ export function listenIcyStreamTitle(streamUrl, { onTitle, onError } = {}) {
   return {
     stop() {
       stopped = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
       try {
         req?.destroy();
       } catch {}
