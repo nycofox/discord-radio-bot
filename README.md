@@ -34,6 +34,30 @@ Optional:
 docker compose up --build -d
 ```
 
+## Getting Discord Tokens and IDs
+
+### Bot Token
+
+1) Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a New Application.
+2) Open the application and go to **Bot** in the left sidebar.
+3) Click **Add Bot** if you haven't already.
+4) Under **Token**, click **Reset Token** (or **View Token**) and copy the bot token.
+5) Paste the value into `DISCORD_TOKEN` in your `.env` file.
+
+### Guild (Server) ID
+
+1) In the Discord client, open **User Settings → Advanced** and enable **Developer Mode**.
+2) Right-click your server icon and choose **Copy Server ID**.
+3) Paste the value into `GUILD_ID` in your `.env` file.
+
+### Voice/Text Channel IDs
+
+1) With **Developer Mode** enabled, right-click the target voice channel and choose **Copy Channel ID**.
+2) Paste the value into `VOICE_CHANNEL_ID` in your `.env` file.
+3) For now playing updates, right-click the text channel and choose **Copy Channel ID**.
+4) Paste the value into `NOWPLAYING_TEXT_CHANNEL_ID` in your `.env` file.
+
+
 ## Notes
 
 - The bot will attempt to reconnect to the voice channel if disconnected.
